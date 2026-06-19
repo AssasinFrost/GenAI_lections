@@ -212,7 +212,7 @@ class LLMAgent:
             if tool_name in self.tools:
                 print(f"Выполняется инструмент: '{tool_name}'")
                 result = self.tools[tool_name].use(tool_input)
-                print(f"Результат: {result[:100]}...")
+                print(f"Результат: {result}...")
                 
                 # Добавляем результат в историю
                 self.conversation_history.append({

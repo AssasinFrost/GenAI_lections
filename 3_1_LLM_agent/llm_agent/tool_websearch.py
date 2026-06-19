@@ -24,7 +24,7 @@ class WebSearchTool:
             if not search_results:
                 return f"По запросу '{query}' ничего не найдено."
 
-            print(f"> Найдено {len(search_results)} новостных статей.")
+            print(f"> Найдено {len(search_results)} результатов.")
             
             # Собираем подробные описания (сниппеты) в одну сводку
             for i, result in enumerate(search_results, 1):
