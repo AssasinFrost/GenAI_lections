@@ -1,4 +1,6 @@
 #from markitdown import MarkItDown
+
+#pip install pymupdf langchain-text-splitters sentence-transformers chromadb langchain-ollama langchain-core
 import os
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -32,9 +34,10 @@ def extract_text_from_pdf(pdf_path):
         return ""
 
 all_chunks = []
-pdf_dir = "pdf/"
 
-client = chromadb.PersistentClient(path="./vector_db")
+pdf_dir = "langchain_1/pdf/"
+
+client = chromadb.PersistentClient(path="./langchain_1/vector_db")
 collection = client.get_or_create_collection(name="patents")
 
 model = SentenceTransformer('intfloat/multilingual-e5-small') #'multi-qa-mpnet-base-dot-v1'

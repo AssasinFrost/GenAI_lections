@@ -6,6 +6,9 @@ import chromadb
 from chromadb.utils import embedding_functions
 import fitz  # PyMuPDF
 from decouple import config
+#pip install pymorphy3 rank-bm25 numpy
+import pymorphy3
+import numpy as np
 from rank_bm25 import BM25Okapi  # NEW: BM25 reranking
 
 # ============================================================================
@@ -14,11 +17,11 @@ from rank_bm25 import BM25Okapi  # NEW: BM25 reranking
 
 class Config:
     # Выбор API: "ollama" или "openrouter"
-    API_CHOICE = "openrouter"  # поменяйте при необходимости
+    API_CHOICE = "ollama"  # поменяйте при необходимости
 
     # Настройки Ollama
     OLLAMA_URL = "http://localhost:11434/api/generate"
-    OLLAMA_MODEL = "qwen3:0.6b"
+    OLLAMA_MODEL = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"
 
     # Настройки OpenRouter (если нужно)
     OPENROUTER_KEY = config('OPENROUTER_API_KEY')
@@ -26,8 +29,8 @@ class Config:
     OPENROUTER_MODEL = "qwen/qwen3-coder-next"
 
     # Пути
-    DATA_DIR = "./data/pdf"  # папка с PDF файлами
-    CHROMA_DB = "./chroma_db"
+    DATA_DIR = "./papers_manual//data/pdf"  # папка с PDF файлами
+    CHROMA_DB = "./papers_manual/chroma_db"
 
     # Модель для эмбеддингов (локальная)
     EMBEDDING_MODEL = "all-MiniLM-L6-v2"
@@ -83,26 +86,40 @@ class VectorDB:
         self.corpus_texts = []  # NEW: тексты чанков в той же последовательности
         self.bm25_tokenized = []  # NEW: токенизированные чанки для BM25
         self.corpus_bm25_scores_cache = None  # NEW: кэш скоров BM25 для текущего запроса (не обязателен, можно перерасчитывать)
+        self.morph = pymorphy3.MorphAnalyzer()
 
+        #try:
+        #    self.collection = self.client.get_collection("documents", embedding_function=self.embedder)
+        #    print("✓ База данных загружена")
+        #except:
         try:
-            self.collection = self.client.get_collection("documents", embedding_function=self.embedder)
-            print("✓ База данных загружена")
+            self.client.delete_collection("documents")
         except:
-            self.collection = self.client.create_collection(
-                name="documents",
-                embedding_function=self.embedder,
-                 configuration={
-                    "hnsw": {
-                        "space": "cosine"
-                    }
-                 }
-            )
-            print("✓ Создана новая база данных")
-            self.load_documents()
+            None
+        self.collection = self.client.create_collection(
+            name="documents",
+            embedding_function=self.embedder,
+                configuration={
+                "hnsw": {
+                    "space": "cosine"
+                }
+                }
+        )
+        print("✓ Создана новая база данных")
+        self.load_documents()
     
-    def _tokenize_text(self, text):
-        # Простая токенизация: lowercased by words
-        return text.lower().split()
+    #def _tokenize_text(self, text):
+    #    # Простая токенизация: lowercased by words
+    #    return text.lower().split()
+
+    def russian_tokenizer(self, text):
+        text = text.lower()
+        # Находим все слова
+        words = re.findall(r'\b[а-яёa-z0-9]+\b', text)
+        
+        # Приводим каждое слово к нормальной форме (например: "удочку" -> "удочка")
+        tokens = [self.morph.parse(w)[0].normal_form for w in words]
+        return tokens
     
     def load_documents(self):
         """Загружает все PDF из папки в базу"""
@@ -136,7 +153,7 @@ class VectorDB:
                 all_chunks.append(chunk)
                 all_metas.append({
                     "file": pdf_file.name,
-                    "chunk": len(all_chunks)
+                    "chunk": chunk_id
                 })
                 all_ids.append(f"chunk_{chunk_id}")
                 chunk_id += 1
@@ -150,83 +167,116 @@ class VectorDB:
             print(f"✓ Загружено {len(all_chunks)} текстовых фрагментов")
 
             # NEW: Build BM25 index for reranking on top of embedding search
-            # Tokenize corpus for BM25
+            # Применение в вашем коде:
             self.corpus_texts = all_chunks
-            self.bm25_tokenized = [c.split() for c in all_chunks]
+            self.bm25_tokenized = [self.russian_tokenizer(c) for c in all_chunks]
             if self.bm25_tokenized:
                 self.bm25 = BM25Okapi(self.bm25_tokenized)
                 print("✓ BM25 индекс создан для гибридного поиска")
+                print(self.bm25)
+                print(self.corpus_texts.__len__)
     
     def search(self, query, n_results=5):
-        """Ищет похожие тексты"""
+        """Ищет похожие тексты с использованием честного гибридного поиска"""
         try:
-            results = self.collection.query(
-                query_texts=[query],
-                n_results=n_results
-            )
+            # Если гибридный поиск выключен или BM25 не готов — ищем только по векторам
+            if not Config.HYBRID_ENABLED or self.bm25 is None or not self.corpus_texts:
+                print("\n\nBM25 не настроен! Использую только vector search\n\n")
+                results = self.collection.query(query_texts=[query], n_results=n_results)
+
+                formatted = []
+
+                if results['documents'] and results['documents'][0]:
+
+                    for i in range(len(results['documents'][0])):
+                        doc = results['documents'][0][i]
+                        meta = results['metadatas'][0][i] if results['metadatas'] else {}
+                        # Конвертируем дистанцию ChromaDB (L2) в скор схожести
+                        score = 1 - results['distances'][0][i] if results['distances'] else 1.0
+                        formatted.append({
+                            "text": doc,
+                            "file": meta.get("file", "unknown"),
+                            "score": round(score, 3)
+                        })
+
+                return formatted
+
+            # --- ЧЕСТНЫЙ ГИБРИДНЫЙ ПОИСК ---
+            # 1. Шаг для BM25: Токенизируем запрос тем же методом, что и корпус
+            q_tokens = self.russian_tokenizer(query)
+            bm25_scores = self.bm25.get_scores(q_tokens)
             
-            # Форматируем результаты
-            formatted = []
-            for i in range(len(results['documents'][0])):
-                doc = results['documents'][0][i]
-                meta = results['metadatas'][0][i]
-                score_embed = 1 - results['distances'][0][i] if results['distances'] else 1.0
-                
-                formatted.append({
-                    "text": doc, #doc[:500] + "..." if len(doc) > 500 else doc,
-                    "file": meta.get("file", "unknown"),
-                    "chunk": meta.get("chunk", None),
-                    "emb_score": score_embed
+            # Нормализуем скоры BM25 (делаем от 0.0 до 1.0)
+            max_bm25 = max(bm25_scores) if len(bm25_scores) > 0 else 0
+            if max_bm25 > 0:
+                bm25_scores_norm = [score / max_bm25 for score in bm25_scores]
+            else:
+                bm25_scores_norm = [0.0] * len(bm25_scores)
+
+            # 2. Берем из ChromaDB БОЛЬШЕ кандидатов (например, 20-30), чтобы было из чего выбирать
+            candidate_count = min(30, len(self.corpus_texts))
+            vector_results = self.collection.query(query_texts=[query], n_results=candidate_count)
+
+            # Переводим векторные результаты в удобный словарь по chunk_idx для быстрого мэтчинга
+            vector_candidates = {}
+            if vector_results['documents'] and vector_results['documents'][0]:
+                for i in range(len(vector_results['documents'][0])):
+                    meta = vector_results['metadatas'][0][i] if vector_results['metadatas'] else {}
+                    # Важно: chunk в вашей базе должен сохраняться как индекс (0, 1, 2...), а не 1-based (1, 2, 3...)
+                    # Если он 1-based, используйте: meta.get("chunk", 1) - 1
+                    chunk_idx = meta.get("chunk") 
+                    
+                    if chunk_idx is not None and isinstance(chunk_idx, int):
+                        emb_score = 1 - vector_results['distances'][0][i] if vector_results['distances'] else 1.0
+                        vector_candidates[chunk_idx] = {
+                            "text": vector_results['documents'][0][i],
+                            "file": meta.get("file", "unknown"),
+                            "emb_score": emb_score
+                        }
+
+            # 3. Шаг для BM25 кандидатов: берем топ индексов из BM25
+            top_bm25_indices = np.argsort(bm25_scores)[::-1][:candidate_count]
+
+            # 4. Объединяем кандидатов (Union) из обоих источников
+            all_candidate_indices = set(list(vector_candidates.keys()) + list(top_bm25_indices))
+
+            hybrid_results = []
+            for idx in all_candidate_indices:
+                # Проверяем границы индекса корпуса
+                if idx < 0 or idx >= len(self.corpus_texts):
+                    continue
+
+                # Получаем векторный скор (если нет в векторе, ставим 0.0)
+                if idx in vector_candidates:
+                    text = vector_candidates[idx]["text"]
+                    file = vector_candidates[idx]["file"]
+                    emb_score = vector_candidates[idx]["emb_score"]
+                else:
+                    # Если в векторе не нашлось, берем текст напрямую из сохраненного self.corpus_texts
+                    text = self.corpus_texts[idx]
+                    file = "unknown" # Метаданные можно вытащить, если вы храните их список параллельно корпусу
+                    emb_score = 0.0
+
+                # Получаем нормализованный BM25 скор
+                bm25_score_norm = bm25_scores_norm[idx]
+
+                # Считаем финальный взвешенный гибридный скор
+                final_score = (Config.BM25_WEIGHT * bm25_score_norm) + ((1.0 - Config.BM25_WEIGHT) * emb_score)
+
+                hybrid_results.append({
+                    "text": text,
+                    "file": file,
+                    "score": final_score
                 })
+
+            # 5. Сортируем общий пул по финальному скору и отдаем строго n_results
+            hybrid_results.sort(key=lambda x: x["score"], reverse=True)
             
-            # NEW: BM25 reranking (hybrid)
-            if Config.HYBRID_ENABLED and self.bm25 is not None and self.corpus_texts:
-                # Prepare BM25 scores for the query against entire corpus
-                q_tokens = self._tokenize_text(query)
-                bm25_scores = self.bm25.get_scores(q_tokens)  # aligned to corpus_texts
-                max_bm25 = max(bm25_scores) if len(bm25_scores) > 0 else 1.0
-
-                # Compute hybrid score for each result, then sort by it
-                hybrid_results = []
-                for idx, item in enumerate(formatted):
-                    chunk_idx = (item["chunk"] - 1) if isinstance(item.get("chunk"), int) else None
-                    if chunk_idx is not None and 0 <= chunk_idx < len(bm25_scores):
-                        bm25_score_norm = bm25_scores[chunk_idx] / (max_bm25 + 1e-9)
-                    else:
-                        bm25_score_norm = 0.0
-
-                    emb_score = item.get("emb_score", 0.0)
-                    final_score = (Config.BM25_WEIGHT * bm25_score_norm) + ((1.0 - Config.BM25_WEIGHT) * emb_score)
-
-                    hybrid_results.append({
-                        "text": item["text"],
-                        "file": item["file"],
-                        "chunk": item.get("chunk"),
-                        "emb_score": emb_score,
-                        "bm25_score_norm": bm25_score_norm,
-                        "score": final_score
-                    })
-
-                # Sort by hybrid score (desc)
-                hybrid_results.sort(key=lambda x: x["score"], reverse=True)
-
-                # Return in the expected format
-                return [
-                    {"text": r["text"], "file": r["file"], "score": round(r["score"], 3)}
-                    for r in hybrid_results
-                ]
-
-            # If hybrid not enabled or BM25 not available, return embedding-based results
-            for i in range(len(formatted)):
-                formatted[i]["score"] = round(formatted[i].get("emb_score", 0.0), 3)
-
-            # Fallback: sort by embedding score (already in order, but ensure sorting)
-            formatted.sort(key=lambda x: x["score"], reverse=True)
-
             return [
-                {"text": r["text"], "file": r["file"], "score": r["score"]}
-                for r in formatted
+                {"text": r["text"], "file": r["file"], "score": round(r["score"], 3)}
+                for r in hybrid_results[:n_results]
             ]
+
         except Exception as e:
             print(f"Ошибка поиска: {e}")
             return []
@@ -390,9 +440,9 @@ if __name__ == "__main__":
 
 #Как использовать
 #- Установите зависимость:
-#  - pip install rank_bm25
-#- По умолчанию включен гибридный режим (HYBRID_ENABLED = True) и вес BM25_BM25_WEIGHT = 0.5. Чтобы полностью полагаться на векторное поиск, установите BM25_WEIGHT = 0.0 или HYBRID_ENABLED = False.
-#- Прогоните ваш код как обычно. При загрузке PDF будет построен BM25 индекс для reranking.
+#  - pip install pymorphy3 rank-bm25 numpy
+#- По умолчанию включен гибридный режим (HYBRID_ENABLED = True) и вес BM25_BM25_WEIGHT = 0.5. Чтобы полностью полагаться на векторный поиск, установите BM25_WEIGHT = 0.0 или HYBRID_ENABLED = False.
+#- Удалите папку chroma_db. Прогоните ваш код как обычно. При загрузке PDF будет построен BM25 индекс для reranking.
 
 #Объяснение
 #- Векторная часть остается как прежде: сначала выполняется поиск по эмбеддингам в ChromaDB.

@@ -2,6 +2,7 @@
 Упрощённая RAG-система для поиска в PDF документах
 Работает с Ollama (локально) или OpenRouter
 """
+#pip install pymupdf chromadb python-decouple requests
 
 import os
 import re
@@ -18,11 +19,11 @@ from decouple import config
 
 class Config:
     # Выбор API: "ollama" или "openrouter"
-    API_CHOICE = "openrouter"  # поменяйте при необходимости
+    API_CHOICE = "ollama"  # поменяйте при необходимости
     
     # Настройки Ollama
     OLLAMA_URL = "http://localhost:11434/api/generate"
-    OLLAMA_MODEL = "qwen3:0.6b"
+    OLLAMA_MODEL = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"
     
     # Настройки OpenRouter (если нужно)
     OPENROUTER_KEY = config('OPENROUTER_API_KEY')
@@ -30,8 +31,8 @@ class Config:
     OPENROUTER_MODEL = "qwen/qwen3-coder-next"
     
     # Пути
-    DATA_DIR = "./data/pdf"  # папка с PDF файлами
-    CHROMA_DB = "./chroma_db"
+    DATA_DIR = "./papers_manual/data/pdf"  # папка с PDF файлами
+    CHROMA_DB = "./papers_manual//chroma_db"
     
     # Модель для эмбеддингов (локальная)
     EMBEDDING_MODEL = "all-MiniLM-L6-v2"
@@ -179,7 +180,10 @@ def ask_ollama(prompt):
             json={
                 "model": Config.OLLAMA_MODEL,
                 "prompt": prompt,
-                "stream": False
+                "stream": False,
+                "options": {
+                    "temperature": 0.2
+                }
             },
             timeout=60
         )

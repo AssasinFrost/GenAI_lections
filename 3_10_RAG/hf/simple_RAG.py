@@ -5,7 +5,7 @@ def add_chunk_to_database(chunk):
   VECTOR_DB.append((chunk, embedding))
 
 dataset = []
-with open('cat-facts.txt', 'r') as file:
+with open('hf/cat-facts.txt', 'r') as file:
   dataset = file.readlines()
   print(f'Loaded {len(dataset)} entries')
 
@@ -46,15 +46,24 @@ for chunk, similarity in retrieved_knowledge:
   print(f' - (similarity: {similarity:.2f}) {chunk}')
 
 instruction_prompt = f'''You are a helpful chatbot.
-Use only the following pieces of context to answer the question. Don't make up any new information:
-{'\n'.join([f' - {chunk}' for chunk, similarity in retrieved_knowledge])}
+
 '''
+
+context = '\n'.join([f' -- {chunk}' for chunk, similarity in retrieved_knowledge])
+
+prompt = f'''Use only the context to answer the question. Don't make up any new information.
+####
+CONTEXT:
+{context}
+####
+ 
+QUESTION: {input_query}'''
 
 stream = ollama.chat(
   model=LANGUAGE_MODEL,
   messages=[
     {'role': 'system', 'content': instruction_prompt},
-    {'role': 'user', 'content': input_query},
+    {'role': 'user', 'content': prompt},
   ],
   stream=True,
 )
