@@ -2,10 +2,31 @@ import unittest
 import sys
 import os
 from unittest.mock import patch, Mock
+import requests
 
-
+# Добавляем путь к папке с модулем
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '3_1_LLM_agent'))
 from fallback_model import FallbackModel
+
+
+def is_ollama_available(model="hf.co/unsloth/Qwen3.5-4B-GGUF:Q4_K_S", url="http://localhost:11434", timeout=5):
+    """
+    Проверяет доступность Ollama и наличие указанной модели.
+    """
+    try:
+        # Проверяем, отвечает ли сервер
+        response = requests.get(f"{url}/api/tags", timeout=timeout)
+        if response.status_code != 200:
+            return False
+        # Проверяем, есть ли модель в списке
+        models = response.json().get("models", [])
+        for m in models:
+            if m.get("name") == model:
+                return True
+        return False
+    except:
+        return False
+
 
 class TestFallbackModel(unittest.TestCase):
 
@@ -13,11 +34,13 @@ class TestFallbackModel(unittest.TestCase):
         self.model = FallbackModel(
             openrouter_api_key="test_key",
             openrouter_model="test/model",
-            ollama_model="test_model",
+            ollama_model="hf.co/unsloth/Qwen3.5-4B-GGUF:Q4_K_S",
             ollama_url="http://localhost:11434",
             timeout=5,
             retries=1
         )
+
+    # --- Юнит-тесты с моками (обязательные) ---
 
     @patch('fallback_model.requests.post')
     def test_openrouter_success(self, mock_post):
@@ -88,6 +111,40 @@ class TestFallbackModel(unittest.TestCase):
 
         result2 = self.model.generate("Test")
         self.assertEqual(result2, "OpenRouter response")
+
+    # --- Интеграционный тест с реальной Ollama (дополнительный) ---
+
+    @unittest.skipIf(not is_ollama_available(), "Ollama not available or model not found")
+    def test_real_ollama_generate(self):
+        """Тест 5: реальный вызов Ollama (интеграционный)."""
+        # Создаём экземпляр с реальными параметрами
+        real_model = FallbackModel(
+            openrouter_api_key="dummy",  # не будет использоваться, т.к. мы сразу идём в Ollama
+            openrouter_model="dummy",
+            ollama_model="hf.co/unsloth/Qwen3.5-4B-GGUF:Q4_K_S",
+            ollama_url="http://localhost:11434",
+            timeout=30,
+            retries=1
+        )
+        # Принудительно переключаемся на Ollama, чтобы не пытаться вызвать OpenRouter
+        real_model._primary_available = False
+
+        result = real_model.generate("Напиши слово 'Привет' на русском")
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) > 0)
+
+    def test_process_query_returns_string(self):
+        """Тест 6: метод process_query всегда возвращает строку."""
+        # Мокаем generate, чтобы он возвращал None
+        with patch.object(self.model, 'generate', return_value=None):
+            result = self.model.process_query("Test")
+            self.assertEqual(result, "Извините, не удалось получить ответ ни от одного из API.")
+
+        with patch.object(self.model, 'generate', return_value="OK"):
+            result = self.model.process_query("Test")
+            self.assertEqual(result, "OK")
+
 
 if __name__ == '__main__':
     unittest.main()
