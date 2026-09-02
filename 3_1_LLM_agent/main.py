@@ -1,7 +1,7 @@
 # main.py
 
 from fallback_model import FallbackModel
-from fallback_llm_agent import FallbackLLMAgent 
+from fallback_llm_agent import FallbackLLMAgent
 # from llm_agent.core_v2 import LLMAgent
 
 def main():
