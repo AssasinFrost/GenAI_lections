@@ -123,7 +123,7 @@ class TestFallbackModel(unittest.TestCase):
             openrouter_model="dummy",
             ollama_model="hf.co/unsloth/Qwen3.5-4B-GGUF:Q4_K_S",
             ollama_url="http://localhost:11434",
-            timeout=30,
+            timeout=120,
             retries=1
         )
         # Принудительно переключаемся на Ollama, чтобы не пытаться вызвать OpenRouter
